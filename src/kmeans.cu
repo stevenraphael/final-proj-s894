@@ -77,3 +77,46 @@ __global__ void kmeans(
     uint32_t *centroid_map,
 ){
 }
+
+struct Scene {
+    int32_t dims;
+    int32_t n_points;
+    int32_t n_centroids;
+    std::vector<float> features;
+};
+
+
+Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
+    auto unif_100 = std::uniform_real_distribution<float>(-100.0f, 100.0f);
+    auto true_centroids = std::vector<float>();
+
+    const float stddev = 10.0;
+
+    for (int32_t i = 0; i < n_centroids*dims; i++) {
+        float z;
+        z = unif_0_1(rng);
+
+    
+        // float z = std::max(unif_0_1(rng), unif_0_1(rng));
+        true_centroids.push_back(z);
+    }
+
+    auto normal = std::normal_distribution<double>(0.0, stddev);
+
+    auto features = std::vector<float>();
+
+    for (int32_t cent = 0; cent < n_centroids; cent++) {
+        for(int point=0;point<1+n_points/n_centroids;point++){
+            if((1+n_points/n_centroids)*cent+point>=n_points){
+                break;
+            }
+            for(int dim=0;dim<dims;dim++){
+                float feature = normal(rng)+true_centroids[cent*dims+dim];
+                features.push_back(feature);
+            }
+        }
+    }
+
+    auto scene = Scene{n_points, n_centroids, dims, features};
+
+}
