@@ -8,6 +8,8 @@
 #include <random>
 #include <vector>
 
+#include <cuda/std/unordered_map>
+
 
 enum class Mode {
     TEST,
@@ -47,7 +49,7 @@ __device__ void compute_clusters(
 
     
 
-    int point_idx = threadIdx.x+threadIdx.y*warp_size+threadIdx.z*block_size+blockIdx.x*warp_size*block_size;
+    int point_idx = threadIdx.x+threadIdx.y*warp_size+blockIdx.x*warp_size*block_size;
     for(int idx=0;idx<d;idx++){
         float point_coord = points[point_idx*d+idx];
         float centroid_coord = centroids[idx];
@@ -70,7 +72,14 @@ __device__ void compute_clusters(
 }
 
 
-const int points_per_thread = 1;
+const int points_per_thread = 8;
+
+const int warp_size_2 = 4;
+
+const int block_size_2 = 32;
+
+
+const int MAX_CENTROIDS = 100;
 
 __device__ void compute_centroids(
     int n,
@@ -84,6 +93,25 @@ __device__ void compute_centroids(
     float *global_dist_sums,
     float *global_point_counts
 ){
+    int dim = threadIdx.x;
+    int point_idx = threadIdx.y*points_per_thread+threadIdx.z*points_per_thread*warp_size_2
+                    +blockIdx.x*points_per_thread*warp_size_2*block_size_2;
+
+    cuda::std::unordered_map<int, float> sum_map;
+    cuda::std::unordered_map<int, int> count_map;
+
+    for(int p=point_idx;p<points_per_thread;p++){
+        int label = centroid_map[p];
+        if(count_map.contains(centroid_map[p])){
+            count_map[p]++;
+            centroid_map[p] += points[p*d+dim];
+        }
+        else{
+            count_map[p]=1;
+            centroid_map[p] = points[p*d+dim];
+        }
+    }
+    
 }
 
 
