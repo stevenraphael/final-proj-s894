@@ -9,6 +9,8 @@
 #include <vector>
 
 #include <cuda/std/unordered_map>
+#include <cub/device/device_reduce.cuh>
+
 
 
 enum class Mode {
@@ -25,6 +27,17 @@ struct Scene {
     std::vector<float> initial_centroids;
     std::vector<float> features;
 };
+
+
+struct AddOp
+{
+    template <typename T>
+    __host__ __forceinline__
+    T operator()(const T &a, const T &b) const {
+        return a+b;
+    }
+};
+
 
 namespace kmeans {
 
@@ -92,8 +105,6 @@ __device__ void compute_centroids(
     float *points,
     float *centroids,
     uint32_t *centroid_map,
-    float *local_dist_sums,
-    float *local_point_counts,
     float *global_dist_sums,
     float *global_point_counts
 ){
@@ -130,7 +141,7 @@ __device__ void compute_centroids(
             if(dim===0){
                 global_point_counts[((n/points_per_thread)+1)*i+output_idx] = count_map[i];
             }
-            global_point_counts[((n/points_per_thread)+1)*(i*d+dim)+output_idx] = sum_map[i];
+            global_dist_sums[((n/points_per_thread)+1)*(i*d+dim)+output_idx] = sum_map[i];
         }
     }
 
@@ -160,6 +171,30 @@ void launch_kmeans(
     float *output_centroids,
     GpuMemoryPool &memory_pool
 ){
+
+    int *centroid_map = reinterpret_cast<int *>(memory_pool.alloc(n*sizeof(int)));
+    int *point_counts = reinterpret_cast<int *>(memory_pool.alloc(n*sizeof(int)/points_per_thread));
+    float *dist_sums = reinterpret_cast<float *>(memory_pool.alloc(n*d*sizeof(float)/points_per_thread));
+
+
+    // step 1: get clusters of points
+    // step 2: get local point counts and point sums
+
+    // step 3: reduce point counts and sums
+
+    //https://nvidia.github.io/cccl/cub/api/structcub_1_1DeviceReduce.html#_CPPv4N3cub12DeviceReduceE
+
+
+    for(int i=0;i<100;i++){
+        dim3 thread_dims_1 = dim3(warp_size, block_size);
+
+        dim3 thread_dims_2 = dim3(d,warp_size_2, block_size_2);
+
+        int num_blocks_2 = n/warp_size_2/block_size_2/points_per_thread+1;
+
+        compute_clusters<<<n/warp_size/block_size+1,thread_dims_1>>>(n,k,d,points,initial_centroids,centroid_map);
+        compute_centroids<<<num_blocks_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
+    }
 
 }
 
