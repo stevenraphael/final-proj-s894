@@ -81,6 +81,10 @@ const int block_size_2 = 32;
 
 const int MAX_CENTROIDS = 100;
 
+
+
+
+
 __device__ void compute_centroids(
     int n,
     int k,
@@ -97,20 +101,39 @@ __device__ void compute_centroids(
     int point_idx = threadIdx.y*points_per_thread+threadIdx.z*points_per_thread*warp_size_2
                     +blockIdx.x*points_per_thread*warp_size_2*block_size_2;
 
+
+    int output_idx = point_idx/points_per_thread;
+
+
+    
+
+    
+
     cuda::std::unordered_map<int, float> sum_map;
     cuda::std::unordered_map<int, int> count_map;
 
     for(int p=point_idx;p<points_per_thread;p++){
         int label = centroid_map[p];
-        if(count_map.contains(centroid_map[p])){
-            count_map[p]++;
-            centroid_map[p] += points[p*d+dim];
+        if(sum_map.contains(centroid_map[p])){
+            if(dim==0)
+                count_map[p]++;
+            sum_map[p] += points[p*d+dim];
         }
         else{
-            count_map[p]=1;
-            centroid_map[p] = points[p*d+dim];
+            if(dim==0)
+                count_map[p]=1;
+            sum_map[p] += points[p*d+dim];
         }
     }
+    for(int i=0;i<k;i++){
+        if(sum_map.contains(i)){
+            if(dim===0){
+                global_point_counts[((n/points_per_thread)+1)*i+output_idx] = count_map[i];
+            }
+            global_point_counts[((n/points_per_thread)+1)*(i*d+dim)+output_idx] = sum_map[i];
+        }
+    }
+
     
 }
 
