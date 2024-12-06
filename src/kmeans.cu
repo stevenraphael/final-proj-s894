@@ -9,7 +9,7 @@
 #include <vector>
 
 #include <cuda/std/unordered_map>
-#include <cub/device/device_reduce.cuh>
+#include <cub/device/device_segmented_reduce.cuh>
 
 
 
@@ -38,6 +38,8 @@ struct AddOp
     }
 };
 
+AddOp add_op;
+
 
 namespace kmeans {
 
@@ -63,6 +65,7 @@ __device__ void compute_clusters(
     
 
     int point_idx = threadIdx.x+threadIdx.y*warp_size+blockIdx.x*warp_size*block_size;
+    if(point_idx>=n) return;
     for(int idx=0;idx<d;idx++){
         float point_coord = points[point_idx*d+idx];
         float centroid_coord = centroids[idx];
@@ -123,7 +126,8 @@ __device__ void compute_centroids(
     cuda::std::unordered_map<int, float> sum_map;
     cuda::std::unordered_map<int, int> count_map;
 
-    for(int p=point_idx;p<points_per_thread;p++){
+    for(int p=point_idx;p<point_idx+points_per_thread;p++){
+        if(p>=n) break;
         int label = centroid_map[p];
         if(sum_map.contains(centroid_map[p])){
             if(dim==0)
@@ -136,6 +140,7 @@ __device__ void compute_centroids(
             sum_map[p] += points[p*d+dim];
         }
     }
+    //__syncthreads();
     for(int i=0;i<k;i++){
         if(sum_map.contains(i)){
             if(dim===0){
@@ -149,17 +154,21 @@ __device__ void compute_centroids(
 }
 
 
-
-__global__ void kmeans(
+__global__ void reset_centroids(
     int n,
     int k,
     int d,
-    float *points,
-    float *initial_centroids,
-    float *output_centroids,
-    uint32_t *centroid_map,
+    int *point_counts,
+    float *centroid_sums,
+    float *initial_centroids
 ){
+    for(int c=0;c<k;c++){
+        for(int dim=0;dim<d;dim++){
+            initial_centroids[c*d+dim]=centroid_sums[c*d+dim]/point_counts[c];
+        }
+    }
 }
+
 
 
 void launch_kmeans(
@@ -169,12 +178,49 @@ void launch_kmeans(
     float *points,
     float *initial_centroids,
     float *output_centroids,
+    int *count_offsets_gpu,
+    int *sum_offsets_gpu,
+    int *total_counts_gpu,
+    float *total_sums_gpu,
     GpuMemoryPool &memory_pool
 ){
+
 
     int *centroid_map = reinterpret_cast<int *>(memory_pool.alloc(n*sizeof(int)));
     int *point_counts = reinterpret_cast<int *>(memory_pool.alloc(n*sizeof(int)/points_per_thread));
     float *dist_sums = reinterpret_cast<float *>(memory_pool.alloc(n*d*sizeof(float)/points_per_thread));
+
+    void* d_temp_storage      = nullptr;
+    size_t temp_count_bytes = 0;
+
+    
+
+    cub::DeviceSegmentedReduce::Reduce(
+    d_temp_storage,
+    temp_count_bytes,
+    point_counts,
+    total_counts_gpu,
+    k,
+    count_offsets_gpu,
+    count_offsets_gpu + 1,
+    add_op,
+    initial_value);
+
+    size_t temp_sum_bytes = 0;
+    cub::DeviceSegmentedReduce::Reduce(
+    d_temp_storage,
+    temp_sum_bytes,
+    dist_sums,
+    total_sums_gpu,
+    k*d,
+    sum_offsets_gpu,
+    sum_offsets_gpu + 1,
+    add_op,
+    initial_value);
+
+
+    uint8_t *temp_count_storage = reinterpret_cast<uint8_t *>(memory_pool.alloc(temp_count_bytes));
+    uint8_t *temp_sum_storage = reinterpret_cast<uint8_t *>(memory_pool.alloc(temp_sum_bytes));
 
 
     // step 1: get clusters of points
@@ -183,6 +229,11 @@ void launch_kmeans(
     // step 3: reduce point counts and sums
 
     //https://nvidia.github.io/cccl/cub/api/structcub_1_1DeviceReduce.html#_CPPv4N3cub12DeviceReduceE
+
+    //https://nvidia.github.io/cccl/cub/api/structcub_1_1DeviceSegmentedReduce.html
+
+    void* d_temp_storage      = nullptr;
+    size_t temp_storage_bytes = 0;
 
 
     for(int i=0;i<100;i++){
@@ -194,6 +245,30 @@ void launch_kmeans(
 
         compute_clusters<<<n/warp_size/block_size+1,thread_dims_1>>>(n,k,d,points,initial_centroids,centroid_map);
         compute_centroids<<<num_blocks_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
+
+        cub::DeviceSegmentedReduce::Reduce(
+        temp_count_storage,
+        temp_count_bytes,
+        point_counts,
+        total_counts_gpu,
+        k,
+        count_offsets_gpu,
+        count_offsets_gpu + 1,
+        add_op,
+        initial_value);
+
+        cub::DeviceSegmentedReduce::Reduce(
+        temp_sum_storage,
+        temp_sum_bytes,
+        dist_sums,
+        total_sums_gpu,
+        k*d,
+        sum_offsets_gpu,
+        sum_offsets_gpu + 1,
+        add_op,
+        initial_value);
+
+        reset_centroids<<<1,1>>>(n,k,d,total_counts_gpu,total_sums_gpu,initial_centroids);
     }
 
 }
@@ -215,23 +290,63 @@ Results run_config(Mode mode, Scene const &scene) {
     auto memory_pool = GpuMemoryPool();
 
 
+    int num_count_segments = scene.n_centroids;
+    int num_sum_segments = scene.n_centroids * scene.dims;
+
+    int segment_size = ((scene.n_points/kmeans.points_per_thread)+1);
+
+    vector<int> count_offsets;
+    vector<int> sum_offsets;
+    for(int i=0;i<num_count_segments+1;i++){
+        count_offsets.push_back(i*segment_size);
+    }
+    for(int i=0;i<num_sum_segments+1;i++){
+        sum_offsets.push_back(i*segment_size);
+    }
+
+
+    vector<int> total_counts(num_count_segments);
+    vector<int> total_sums(num_sum_segments);
+
+
+    auto count_offsets_gpu = GpuBuf<int>(count_offsets);
+    auto sum_offsets_gpu = GpuBuf<int>(sum_offsets);
+
+    auto total_counts_gpu = GpuBuf<int>(total_counts);
+    auto total_sums_gpu = GpuBuf<float>(total_sums);
+
+    
+
+
     auto reset = [&]() {
         CUDA_CHECK(
             cudaMemset(points_gpu.data, 0, scene.features.size() * sizeof(float)));
         CUDA_CHECK(
             cudaMemset(centroids_gpu.data, 0, scene.true_centroids.size() * sizeof(float)));
+        CUDA_CHECK(
+            cudaMemset(count_offsets_gpu.data, 0, (num_count_segments+1) * sizeof(int)));
+        CUDA_CHECK(
+            cudaMemset(sum_offsets_gpu.data, 0, (num_sum_segments+1) * sizeof(int)));
+        CUDA_CHECK(
+            cudaMemset(total_counts_gpu.data, 0, (num_count_segments) * sizeof(int)));
+        CUDA_CHECK(
+            cudaMemset(total_sums_gpu.data, 0, (num_sum_segments) * sizeof(float)));
 
         memory_pool.reset();
     };
 
     auto f = [&]() {
-        kmeans::launch_render(
+        kmeans::launch_kmeans(
             scene.n_points,
             scene.n_centroids,
             scene.dims,
             points_gpu.data,
             scene.initial_centroids.data,
             centroids_gpu.data,
+            count_offsets_gpu.data,
+            sum_offsets_gpu.data,
+            total_counts_gpu.data,
+            total_sums_gpu.data,
             memory_pool);
     };
 
