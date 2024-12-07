@@ -144,9 +144,9 @@ __global__ void compute_clusters(
 
 const int points_per_thread = 8;
 
-const int warp_size_2 = 4;
+const int warp_size_2 = 16;
 
-const int block_size_2 = 32;
+const int block_size_2 = 4;
 
 
 const int MAX_CENTROIDS = 100;
@@ -166,11 +166,13 @@ __global__ void compute_centroids(
     int *global_point_counts
 ){
     
-    int dim = blockIdx.y;
+    int dim = blockIdx.x;
     int point_idx = threadIdx.x*points_per_thread+threadIdx.y*points_per_thread*warp_size_2
-                    +blockIdx.x*points_per_thread*warp_size_2*block_size_2;
+                    +blockIdx.y*points_per_thread*warp_size_2*block_size_2;
 
     int output_idx = point_idx/points_per_thread;
+
+    if(point_idx>=n) return;
 
 
     
@@ -236,11 +238,12 @@ __global__ void reset_centroids(
     
     for(int c=0;c<k;c++){
         for(int dim=0;dim<d;dim++){
+                //printf("%f %d\n",centroid_sums[c*d+dim], point_counts[c]);
             if(point_counts[c]>0)
                 initial_centroids[c*d+dim]=centroid_sums[c*d+dim]/point_counts[c];
         }
     }
-    //printf("yes!!!");
+    
 }
 
 
@@ -312,7 +315,7 @@ void launch_kmeans(
     //size_t temp_storage_bytes = 0;
 
 
-    for(int i=0;i<5;i++){
+    for(int i=0;i<1;i++){
         dim3 thread_dims_1 = dim3(warp_size, block_size);
 
         dim3 thread_dims_2 = dim3(warp_size_2, block_size_2);
@@ -320,7 +323,6 @@ void launch_kmeans(
 
         int num_blocks_2 = n/warp_size_2/block_size_2/points_per_thread+1;
 
-        printf("%d", num_blocks_2);
 
         compute_clusters<<<n/warp_size/block_size+1,thread_dims_1>>>(n,k,d,points,initial_centroids,centroid_map);
         //compute_centroids<<<num_blocks_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
@@ -503,8 +505,10 @@ Results run_config(Mode mode, Scene &scene) {
         cudaMemcpyDeviceToHost));
 
     float squared_dist_sum = 0;
-
-    //printf("%d %d %d", scene.true_centroids.size(),scene.n_centroids, scene.dims);
+    for(int i=0;i<4;i++){
+        printf("%f ", returned_centroids[i]);
+        printf("%f \n", scene.true_centroids[i]);
+    }
 
     for(int i=0;i<scene.n_centroids;i++){
         for(int j=0;j<scene.dims;j++){
@@ -533,7 +537,8 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
     auto true_centroids = std::vector<float>();
 
     const float stddev = 10.0;
-
+    auto initial_centroids = std::vector<float>();
+    auto normal = std::normal_distribution<double>(0.0, stddev);
     for (int32_t i = 0; i < n_centroids*dims; i++) {
         float z;
         z = unif_100(rng);
@@ -541,9 +546,10 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
     
         // float z = std::max(unif_0_1(rng), unif_0_1(rng));
         true_centroids.push_back(z);
+        initial_centroids.push_back(z+normal(rng));
     }
 
-    auto normal = std::normal_distribution<double>(0.0, stddev);
+    
 
     auto features = std::vector<float>();
 
@@ -555,18 +561,19 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
             for(int dim=0;dim<dims;dim++){
                 float feature = normal(rng)+true_centroids[cent*dims+dim];
                 features.push_back(feature);
+                
             }
         }
     }
 
-    auto initial_centroids = std::vector<float>();
+    
     for (int32_t i = 0; i < n_centroids*dims; i++) {
         float z;
         z = unif_100(rng);
 
     
         // float z = std::max(unif_0_1(rng), unif_0_1(rng));
-        initial_centroids.push_back(z);
+        //initial_centroids.push_back(z);
     }
 
     auto scene = Scene{dims, n_points, n_centroids, true_centroids, initial_centroids, features};
@@ -586,7 +593,7 @@ int main(int argc, char const *const *argv) {
     auto rng = std::mt19937(0xCA7CAFE);
     auto scenes = std::vector<SceneTest>();
     scenes.push_back(
-        {"test1", Mode::BENCHMARK, gen_random(rng, 10, 65536, 1)});
+        {"test1", Mode::BENCHMARK, gen_random(rng, 2, 4000, 2)});
     int32_t fail_count = 0;
 
     int32_t count = 0;
