@@ -12,4 +12,4 @@
 echo "Content:"; ls
 
 # Run binary.
-./vector_add
+./kmeans
