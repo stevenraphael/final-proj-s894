@@ -86,7 +86,7 @@ struct Scene {
 struct AddOp
 {
     template <typename T>
-    __device__ __forceinline__
+    __host__ __device__ __forceinline__
     T operator()(const T &a, const T &b) const {
         return a+b;
     }
@@ -165,10 +165,10 @@ __global__ void compute_centroids(
     float *global_dist_sums,
     int *global_point_counts
 ){
-    int dim = threadIdx.x;
-    int point_idx = threadIdx.y*points_per_thread+threadIdx.z*points_per_thread*warp_size_2
+    
+    int dim = blockIdx.y;
+    int point_idx = threadIdx.x*points_per_thread+threadIdx.y*points_per_thread*warp_size_2
                     +blockIdx.x*points_per_thread*warp_size_2*block_size_2;
-
 
     int output_idx = point_idx/points_per_thread;
 
@@ -185,6 +185,7 @@ __global__ void compute_centroids(
     }
     //cuda::std::unordered_map<int, float> sum_map;
     //cuda::std::unordered_map<int, int> count_map;
+    
 
     for(int p=point_idx;p<point_idx+points_per_thread;p++){
         if(p>=n) break;
@@ -196,17 +197,26 @@ __global__ void compute_centroids(
         }*/
         //else{
             if(dim==0)
-                count_map[p]+=1;
-            sum_map[p] += points[p*d+dim];
+                count_map[centroid_map[p]]+=1;
+            sum_map[centroid_map[p]] += points[p*d+dim];
         //}
     }
     //__syncthreads();
+
+    //if(blockIdx.x!=0) return;
+    
     for(int i=0;i<k;i++){
         //if(sum_map.contains(i)){
             if(dim==0){
+                //if(point_idx==0){
                 global_point_counts[((n/points_per_thread)+1)*i+output_idx] = count_map[i];
+                //global_point_counts[0] = 1;
+                //}
             }
+            //if(point_idx==0&&dim==0){
             global_dist_sums[((n/points_per_thread)+1)*(i*d+dim)+output_idx] = sum_map[i];
+            //global_dist_sums[0]=500.0;
+            //}
         //}
     }
 
@@ -220,13 +230,17 @@ __global__ void reset_centroids(
     int d,
     int *point_counts,
     float *centroid_sums,
-    float *initial_centroids
+    float *initial_centroids,
+    int *sum_offsets_gpu
 ){
+    
     for(int c=0;c<k;c++){
         for(int dim=0;dim<d;dim++){
-            initial_centroids[c*d+dim]=centroid_sums[c*d+dim]/point_counts[c];
+            if(point_counts[c]>0)
+                initial_centroids[c*d+dim]=centroid_sums[c*d+dim]/point_counts[c];
         }
     }
+    //printf("yes!!!");
 }
 
 
@@ -247,8 +261,8 @@ void launch_kmeans(
 
 
     uint32_t *centroid_map = reinterpret_cast<uint32_t *>(memory_pool.alloc(n*sizeof(uint32_t)));
-    int *point_counts = reinterpret_cast<int *>(memory_pool.alloc(n*sizeof(int)/points_per_thread));
-    float *dist_sums = reinterpret_cast<float *>(memory_pool.alloc(n*d*sizeof(float)/points_per_thread));
+    int *point_counts = reinterpret_cast<int *>(memory_pool.alloc((n/points_per_thread+1)*k*sizeof(int)));
+    float *dist_sums = reinterpret_cast<float *>(memory_pool.alloc((n/points_per_thread+1)*k*d*sizeof(float)));
 
     void* d_temp_storage      = nullptr;
     size_t temp_count_bytes = 0;
@@ -298,16 +312,19 @@ void launch_kmeans(
     //size_t temp_storage_bytes = 0;
 
 
-    for(int i=0;i<100;i++){
+    for(int i=0;i<5;i++){
         dim3 thread_dims_1 = dim3(warp_size, block_size);
 
-        dim3 thread_dims_2 = dim3(d,warp_size_2, block_size_2);
+        dim3 thread_dims_2 = dim3(warp_size_2, block_size_2);
+        dim3 block_dims_2 = dim3(d, n/warp_size_2/block_size_2/points_per_thread+1);
 
         int num_blocks_2 = n/warp_size_2/block_size_2/points_per_thread+1;
 
-        compute_clusters<<<n/warp_size/block_size+1,thread_dims_1>>>(n,k,d,points,initial_centroids,centroid_map);
-        compute_centroids<<<num_blocks_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
+        printf("%d", num_blocks_2);
 
+        compute_clusters<<<n/warp_size/block_size+1,thread_dims_1>>>(n,k,d,points,initial_centroids,centroid_map);
+        //compute_centroids<<<num_blocks_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
+        compute_centroids<<<block_dims_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
         cub::DeviceSegmentedReduce::Reduce(
         temp_count_storage,
         temp_count_bytes,
@@ -330,7 +347,10 @@ void launch_kmeans(
         add_op,
         initial_value);
 
-        reset_centroids<<<1,1>>>(n,k,d,total_counts_gpu,total_sums_gpu,initial_centroids);
+        //std::cout<<sum_offsets_gpu[0];//<<sum_offsets_gpu[1];
+
+        reset_centroids<<<1,1>>>(n,k,d,total_counts_gpu,total_sums_gpu,initial_centroids, sum_offsets_gpu);
+        //reset_centroids<<<1,1>>>(n,k,d,point_counts,dist_sums,initial_centroids);
     }
 
 }
@@ -427,6 +447,8 @@ Results run_config(Mode mode, Scene &scene) {
     std::vector<int> total_counts(num_count_segments);
     std::vector<float> total_sums(num_sum_segments);
 
+    //printf("%d %d",sum_offsets[0],sum_offsets[1]);
+
 
     auto count_offsets_gpu = GpuBuf<int>(count_offsets);
     auto sum_offsets_gpu = GpuBuf<int>(sum_offsets);
@@ -442,10 +464,10 @@ Results run_config(Mode mode, Scene &scene) {
             cudaMemset(points_gpu.data, 0, scene.features.size() * sizeof(float)));
         CUDA_CHECK(
             cudaMemset(centroids_gpu.data, 0, scene.true_centroids.size() * sizeof(float)));*/
-        CUDA_CHECK(
+        /*CUDA_CHECK(
             cudaMemset(count_offsets_gpu.data, 0, (num_count_segments+1) * sizeof(int)));
         CUDA_CHECK(
-            cudaMemset(sum_offsets_gpu.data, 0, (num_sum_segments+1) * sizeof(int)));
+            cudaMemset(sum_offsets_gpu.data, 0, (num_sum_segments+1) * sizeof(int)));*/
         CUDA_CHECK(
             cudaMemset(total_counts_gpu.data, 0, (num_count_segments) * sizeof(int)));
         CUDA_CHECK(
@@ -486,8 +508,8 @@ Results run_config(Mode mode, Scene &scene) {
 
     for(int i=0;i<scene.n_centroids;i++){
         for(int j=0;j<scene.dims;j++){
-            squared_dist_sum += (scene.true_centroids[i*scene.dims+j]-returned_centroids[i*scene.dims+j]);
-                                //* (scene.true_centroids[i*scene.dims+j]-returned_centroids[i*scene.dims+j]);
+            squared_dist_sum += (scene.true_centroids[i*scene.dims+j]-returned_centroids[i*scene.dims+j])
+                                * (scene.true_centroids[i*scene.dims+j]-returned_centroids[i*scene.dims+j]);
         }
     }
 
@@ -514,7 +536,7 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
 
     for (int32_t i = 0; i < n_centroids*dims; i++) {
         float z;
-        z = unif_0_1(rng);
+        z = unif_100(rng);
 
     
         // float z = std::max(unif_0_1(rng), unif_0_1(rng));
@@ -540,7 +562,7 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
     auto initial_centroids = std::vector<float>();
     for (int32_t i = 0; i < n_centroids*dims; i++) {
         float z;
-        z = unif_0_1(rng);
+        z = unif_100(rng);
 
     
         // float z = std::max(unif_0_1(rng), unif_0_1(rng));
@@ -564,7 +586,7 @@ int main(int argc, char const *const *argv) {
     auto rng = std::mt19937(0xCA7CAFE);
     auto scenes = std::vector<SceneTest>();
     scenes.push_back(
-        {"test1", Mode::BENCHMARK, gen_random(rng, 10, 65536, 10)});
+        {"test1", Mode::BENCHMARK, gen_random(rng, 10, 65536, 1)});
     int32_t fail_count = 0;
 
     int32_t count = 0;
