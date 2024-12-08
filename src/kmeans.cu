@@ -129,7 +129,7 @@ __global__ void compute_clusters(
         float next_dist = 0;
         for(int idx=0;idx<d;idx++){
             float point_coord = points[point_idx*d+idx];
-            float centroid_coord = centroids[i*k+idx];
+            float centroid_coord = centroids[i*d+idx];
             next_dist += (point_coord-centroid_coord)*(point_coord-centroid_coord);
         }
         if(next_dist<curr_dist){
@@ -137,7 +137,6 @@ __global__ void compute_clusters(
             best_centroid = i;
         }
     }
-
     centroid_map[point_idx] = best_centroid;
 }
 
@@ -235,7 +234,7 @@ __global__ void reset_centroids(
     float *initial_centroids,
     int *sum_offsets_gpu
 ){
-    
+    //printf("%D %d\n",k,d);
     for(int c=0;c<k;c++){
         for(int dim=0;dim<d;dim++){
                 //printf("%f %d\n",centroid_sums[c*d+dim], point_counts[c]);
@@ -315,7 +314,7 @@ void launch_kmeans(
     //size_t temp_storage_bytes = 0;
 
 
-    for(int i=0;i<1;i++){
+    for(int i=0;i<5;i++){
         dim3 thread_dims_1 = dim3(warp_size, block_size);
 
         dim3 thread_dims_2 = dim3(warp_size_2, block_size_2);
@@ -505,7 +504,7 @@ Results run_config(Mode mode, Scene &scene) {
         cudaMemcpyDeviceToHost));
 
     float squared_dist_sum = 0;
-    for(int i=0;i<4;i++){
+    for(int i=0;i<scene.true_centroids.size();i++){
         printf("%f ", returned_centroids[i]);
         printf("%f \n", scene.true_centroids[i]);
     }
@@ -519,7 +518,7 @@ Results run_config(Mode mode, Scene &scene) {
 
     float average_squared_dist = squared_dist_sum/scene.n_centroids;
 
-    double time_ms = 0.0;//= benchmark_ms(1000.0, reset, f);
+    double time_ms = 0;//benchmark_ms(1000.0, reset, f);
 
     return Results{
         average_squared_dist,
@@ -593,7 +592,7 @@ int main(int argc, char const *const *argv) {
     auto rng = std::mt19937(0xCA7CAFE);
     auto scenes = std::vector<SceneTest>();
     scenes.push_back(
-        {"test1", Mode::BENCHMARK, gen_random(rng, 2, 4000, 2)});
+        {"test1", Mode::BENCHMARK, gen_random(rng, 10, 200, 2)});
     int32_t fail_count = 0;
 
     int32_t count = 0;
@@ -602,6 +601,7 @@ int main(int argc, char const *const *argv) {
         printf("\nTesting scene '%s'\n", scene_test.name.c_str());
         auto results = run_config(scene_test.mode, scene_test.scene);
         printf("  Error: %f \n", results.average_squared_dist);
+        printf("  Time: %f \n", results.time_ms);
     }
 
 }
