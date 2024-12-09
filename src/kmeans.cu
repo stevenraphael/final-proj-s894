@@ -245,8 +245,6 @@ __global__ void reset_centroids(
     
 }
 
-
-
 void launch_kmeans(
     int n,
     int k,
@@ -259,75 +257,23 @@ void launch_kmeans(
     int *total_counts_gpu,
     float *total_sums_gpu,
     GpuMemoryPool &memory_pool
-){
+) {
+    const float convergence_threshold = 1e-4; // Threshold for centroid change
+    uint32_t *centroid_map = reinterpret_cast<uint32_t *>(memory_pool.alloc(n * sizeof(uint32_t)));
+    int *point_counts = reinterpret_cast<int *>(memory_pool.alloc((n / points_per_thread + 1) * k * sizeof(int)));
+    float *dist_sums = reinterpret_cast<float *>(memory_pool.alloc((n / points_per_thread + 1) * k * d * sizeof(float)));
 
+    // Allocate memory for previous centroids
+    float *prev_centroids = reinterpret_cast<float *>(memory_pool.alloc(k * d * sizeof(float)));
 
-    uint32_t *centroid_map = reinterpret_cast<uint32_t *>(memory_pool.alloc(n*sizeof(uint32_t)));
-    int *point_counts = reinterpret_cast<int *>(memory_pool.alloc((n/points_per_thread+1)*k*sizeof(int)));
-    float *dist_sums = reinterpret_cast<float *>(memory_pool.alloc((n/points_per_thread+1)*k*d*sizeof(float)));
+    // Initialize previous centroids to a high value for the first iteration
+    CUDA_CHECK(cudaMemcpy(prev_centroids, initial_centroids, k * d * sizeof(float), cudaMemcpyDeviceToDevice));
 
-    void* d_temp_storage      = nullptr;
     size_t temp_count_bytes = 0;
-
-    int initial_value = 0;
-
-    
-
-    cub::DeviceSegmentedReduce::Reduce(
-    d_temp_storage,
-    temp_count_bytes,
-    point_counts,
-    total_counts_gpu,
-    k,
-    count_offsets_gpu,
-    count_offsets_gpu + 1,
-    add_op,
-    initial_value);
-
     size_t temp_sum_bytes = 0;
+
     cub::DeviceSegmentedReduce::Reduce(
-    d_temp_storage,
-    temp_sum_bytes,
-    dist_sums,
-    total_sums_gpu,
-    k*d,
-    sum_offsets_gpu,
-    sum_offsets_gpu + 1,
-    add_op,
-    initial_value);
-
-
-    uint8_t *temp_count_storage = reinterpret_cast<uint8_t *>(memory_pool.alloc(temp_count_bytes));
-    uint8_t *temp_sum_storage = reinterpret_cast<uint8_t *>(memory_pool.alloc(temp_sum_bytes));
-
-
-    // step 1: get clusters of points
-    // step 2: get local point counts and point sums
-
-    // step 3: reduce point counts and sums
-
-    //https://nvidia.github.io/cccl/cub/api/structcub_1_1DeviceReduce.html#_CPPv4N3cub12DeviceReduceE
-
-    //https://nvidia.github.io/cccl/cub/api/structcub_1_1DeviceSegmentedReduce.html
-
-    //void* d_temp_storage      = nullptr;
-    //size_t temp_storage_bytes = 0;
-
-
-    for(int i=0;i<5;i++){
-        dim3 thread_dims_1 = dim3(warp_size, block_size);
-
-        dim3 thread_dims_2 = dim3(warp_size_2, block_size_2);
-        dim3 block_dims_2 = dim3(d, n/warp_size_2/block_size_2/points_per_thread+1);
-
-        int num_blocks_2 = n/warp_size_2/block_size_2/points_per_thread+1;
-
-
-        compute_clusters<<<n/warp_size/block_size+1,thread_dims_1>>>(n,k,d,points,initial_centroids,centroid_map);
-        //compute_centroids<<<num_blocks_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
-        compute_centroids<<<block_dims_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
-        cub::DeviceSegmentedReduce::Reduce(
-        temp_count_storage,
+        nullptr,
         temp_count_bytes,
         point_counts,
         total_counts_gpu,
@@ -335,25 +281,91 @@ void launch_kmeans(
         count_offsets_gpu,
         count_offsets_gpu + 1,
         add_op,
-        initial_value);
+        0
+    );
 
-        cub::DeviceSegmentedReduce::Reduce(
-        temp_sum_storage,
+    cub::DeviceSegmentedReduce::Reduce(
+        nullptr,
         temp_sum_bytes,
         dist_sums,
         total_sums_gpu,
-        k*d,
+        k * d,
         sum_offsets_gpu,
         sum_offsets_gpu + 1,
         add_op,
-        initial_value);
+        0
+    );
 
-        //std::cout<<sum_offsets_gpu[0];//<<sum_offsets_gpu[1];
+    uint8_t *temp_count_storage = reinterpret_cast<uint8_t *>(memory_pool.alloc(temp_count_bytes));
+    uint8_t *temp_sum_storage = reinterpret_cast<uint8_t *>(memory_pool.alloc(temp_sum_bytes));
 
-        reset_centroids<<<1,1>>>(n,k,d,total_counts_gpu,total_sums_gpu,initial_centroids, sum_offsets_gpu);
-        //reset_centroids<<<1,1>>>(n,k,d,point_counts,dist_sums,initial_centroids);
+    bool converged = false;
+
+    int iteration = 0;
+    while (!converged) {
+        iteration++;
+        // Step 1: Assign points to nearest centroids
+        dim3 thread_dims_1 = dim3(warp_size, block_size);
+        compute_clusters<<<n / warp_size / block_size + 1, thread_dims_1>>>(
+            n, k, d, points, initial_centroids, centroid_map);
+
+        // Step 2: Compute local sums and counts
+        dim3 thread_dims_2 = dim3(warp_size_2, block_size_2);
+        dim3 block_dims_2 = dim3(d, n / warp_size_2 / block_size_2 / points_per_thread + 1);
+        compute_centroids<<<block_dims_2, thread_dims_2>>>(
+            n, k, d, points, initial_centroids, centroid_map, dist_sums, point_counts);
+
+        // Step 3: Reduce local sums and counts
+        cub::DeviceSegmentedReduce::Reduce(
+            temp_count_storage,
+            temp_count_bytes,
+            point_counts,
+            total_counts_gpu,
+            k,
+            count_offsets_gpu,
+            count_offsets_gpu + 1,
+            add_op,
+            0
+        );
+
+        cub::DeviceSegmentedReduce::Reduce(
+            temp_sum_storage,
+            temp_sum_bytes,
+            dist_sums,
+            total_sums_gpu,
+            k * d,
+            sum_offsets_gpu,
+            sum_offsets_gpu + 1,
+            add_op,
+            0
+        );
+
+        // Step 4: Update centroids
+        reset_centroids<<<1, 1>>>(n, k, d, total_counts_gpu, total_sums_gpu, initial_centroids, sum_offsets_gpu);
+
+        // Step 5: Check for convergence
+        std::vector<float> host_prev_centroids(k * d);
+        std::vector<float> host_new_centroids(k * d);
+
+        CUDA_CHECK(cudaMemcpy(host_prev_centroids.data(), prev_centroids, k * d * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(host_new_centroids.data(), initial_centroids, k * d * sizeof(float), cudaMemcpyDeviceToHost));
+
+        float max_change = 0.0f;
+        for (int i = 0; i < k * d; ++i) {
+            max_change = std::max(max_change, fabs(host_new_centroids[i] - host_prev_centroids[i]));
+        }
+
+        // Copy current centroids to prev_centroids for the next iteration
+        CUDA_CHECK(cudaMemcpy(prev_centroids, initial_centroids, k * d * sizeof(float), cudaMemcpyDeviceToDevice));
+
+        if (max_change < convergence_threshold) {
+            converged = true;
+        }
     }
+    //printf("KMeans converged after %d iterations\n", iteration);
 
+    // Copy final centroids to output
+    CUDA_CHECK(cudaMemcpy(output_centroids, initial_centroids, k * d * sizeof(float), cudaMemcpyDeviceToDevice));
 }
 
 
@@ -504,10 +516,6 @@ Results run_config(Mode mode, Scene &scene) {
         cudaMemcpyDeviceToHost));
 
     float squared_dist_sum = 0;
-    for(int i=0;i<scene.true_centroids.size();i++){
-        printf("%f ", returned_centroids[i]);
-        printf("%f \n", scene.true_centroids[i]);
-    }
 
     for(int i=0;i<scene.n_centroids;i++){
         for(int j=0;j<scene.dims;j++){
@@ -518,7 +526,21 @@ Results run_config(Mode mode, Scene &scene) {
 
     float average_squared_dist = squared_dist_sum/scene.n_centroids;
 
-    double time_ms = 0;//benchmark_ms(1000.0, reset, f);
+    double time_ms = benchmark_ms(5000.0, reset, f);
+
+    for (int i = 0; i < scene.n_centroids; ++i) {
+    printf("Generated Centroid %d: ", i);
+    for (int j = 0; j < scene.dims; ++j) {
+        printf("%f ", scene.true_centroids[i * scene.dims + j]);
+    }
+    printf("\n");
+
+    printf("Computed Centroid %d: ", i);
+    for (int j = 0; j < scene.dims; ++j) {
+        printf("%f ", returned_centroids[i * scene.dims + j]);
+    }
+    printf("\n");
+}
 
     return Results{
         average_squared_dist,
@@ -545,7 +567,8 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
     
         // float z = std::max(unif_0_1(rng), unif_0_1(rng));
         true_centroids.push_back(z);
-        initial_centroids.push_back(z+normal(rng));
+        //initial_centroids.push_back(z+normal(rng));
+        initial_centroids.push_back(unif_100(rng));    
     }
 
     
@@ -592,7 +615,7 @@ int main(int argc, char const *const *argv) {
     auto rng = std::mt19937(0xCA7CAFE);
     auto scenes = std::vector<SceneTest>();
     scenes.push_back(
-        {"test1", Mode::BENCHMARK, gen_random(rng, 10, 200, 2)});
+        {"test1", Mode::BENCHMARK, gen_random(rng, 10, 1000000, 50)});
     int32_t fail_count = 0;
 
     int32_t count = 0;
