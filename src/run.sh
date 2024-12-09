@@ -11,5 +11,12 @@
 # We can see what's on the execution server in the home dir:
 echo "Content:"; ls
 
+apt update
+apt install cmake -y
+
+export CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
 # Run binary.
+CUDA_ARCH=86 pip install git+https://github.com/src-d/kmcuda.git#subdirectory=src
+python3 test.py
+
 ./kmeans

@@ -13,4 +13,5 @@ echo "Building the project..."
 # -----     * all output files (e.g. generated binaries, test inputs, etc.) must be places into $CTR_BUILD_DIR
 # ----------------------------------------------------------------------------------
 # Build code.
+cp test.py ${CTR_BUILD_DIR}/test.py
 nvcc -O3 kmeans.cu -o ${CTR_BUILD_DIR}/kmeans
