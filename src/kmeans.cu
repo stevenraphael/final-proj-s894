@@ -487,6 +487,12 @@ Results run_config(Mode mode, Scene &scene) {
             cudaMemset(total_sums_gpu.data, 0, (num_sum_segments) * sizeof(float)));
 
         memory_pool.reset();
+
+        CUDA_CHECK(cudaMemcpy(
+        centroids_gpu.data,
+        scene.initial_centroids.data(),
+        scene.initial_centroids.size() * sizeof(float),
+        cudaMemcpyHostToDevice));
     };
 
     auto f = [&]() {
