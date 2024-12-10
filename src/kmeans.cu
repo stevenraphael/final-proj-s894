@@ -76,10 +76,12 @@ const int micro_i = 16;
 const int micro_j = 8;
 const int micro_k = 8;
 
-const int CENTROIDBOUND = 150;
+const int CENTROIDBOUND = 128;
 const int num_rows = 4;
 
 const int num_cols = 8;
+
+const int ROWBOUND = micro_i*num_rows;
 
 
 struct shmemstruct{
@@ -103,94 +105,111 @@ __global__ void matmul(
     int i_oo = blockIdx.x * num_rows*micro_i;
 
 
-    int j_oo = 0;
-    
-    for(int i=idx+i_oo;i<i_oo+micro_i*num_rows;i+=32){
-        if(i>=size_i) break;
-        for(int j=0;j<size_j;j++){
-            buf1[(i-i_oo)*CENTROIDBOUND+j] = asquared[i]+bsquared[j];
+    //int j_oo = 0;
+
+    float best_dists[4];
+    int best_cents[4] = {0,0,0,0};
+
+    for(int cent_offset=0;cent_offset<size_j;cent_offset+=CENTROIDBOUND){
+        int upper_j1 = min(size_j, CENTROIDBOUND+cent_offset);
 
 
-        }        
-    }
-    __syncthreads();
-    for(int j_oo=0;j_oo<size_j;j_oo+=num_cols*micro_j){
-        uint32_t b_micro[num_cols][2];
-        uint32_t c_micro[num_rows][num_cols][4];
-        for(int x=0;x<num_rows;x++){
-            for(int y=0;y<num_cols;y++){
-                for(int z=0;z<4;z++){
-                    c_micro[x][y][z] = __float_as_uint(0.0);
+        for(int i=idx+i_oo;i<i_oo+micro_i*num_rows;i+=32){
+            if(i>=size_i) break;
+            for(int j=0;j<CENTROIDBOUND;j++){
+                if(j+cent_offset>=size_j)
+                    break;
+                buf1[j*ROWBOUND+(i-i_oo)] = asquared[i]+bsquared[j+cent_offset];
+
+
+            }        
+        }
+        __syncthreads();
+        for(int j_oo=cent_offset;j_oo<cent_offset+CENTROIDBOUND;j_oo+=num_cols*micro_j){
+            uint32_t b_micro[num_cols][2];
+            uint32_t c_micro[num_rows][num_cols][4];
+            for(int x=0;x<num_rows;x++){
+                for(int y=0;y<num_cols;y++){
+                    for(int z=0;z<4;z++){
+                        c_micro[x][y][z] = __float_as_uint(0.0);
+                    }
                 }
             }
-        }
-        for(int k_outer=0; k_outer<size_k;k_outer+=micro_k){
-            
-            for(int j_outer=0;j_outer<num_cols;j_outer++){
-                bool oob_j = ((idx/4+j_outer*micro_j+j_oo) >= size_j);
+            int upper_cols = min(num_cols, (size_j-j_oo)/micro_j+1);
+            for(int k_outer=0; k_outer<size_k;k_outer+=micro_k){
 
-                bool oob_k1 = (oob_j||((idx%4+k_outer) > size_k));
-                bool oob_k2 = (oob_j||((4+idx%4+k_outer) > size_k));
-                b_micro[j_outer][0] = __float_as_uint(oob_k1 ? 0.0 : *(b+size_k*(idx/4+j_outer*micro_j+j_oo)+idx%4+k_outer));
-                b_micro[j_outer][1] = __float_as_uint(oob_k2 ? 0.0 : *(b+size_k*(idx/4+j_outer*micro_j+j_oo)+4+idx%4+k_outer));
+                
+                for(int j_outer=0;j_outer<upper_cols;j_outer++){
+                    bool oob_j = false;//((idx/4+j_outer*micro_j+j_oo) >= size_j);
+
+                    bool oob_k1 = false;//(oob_j||((idx%4+k_outer) > size_k));
+                    bool oob_k2 = false;//(oob_j||((4+idx%4+k_outer) > size_k));
+                    b_micro[j_outer][0] = __float_as_uint(oob_k1 ? 0.0 : *(b+size_k*(idx/4+j_outer*micro_j+j_oo)+idx%4+k_outer));
+                    b_micro[j_outer][1] = __float_as_uint(oob_k2 ? 0.0 : *(b+size_k*(idx/4+j_outer*micro_j+j_oo)+4+idx%4+k_outer));
+                }
+                for(int i_outer=0;i_outer<num_rows;i_outer++){
+                    
+                    bool oob_i1 = false;//((i_outer*micro_i+idx/4+i_oo) > size_i);
+                    bool oob_i2 = false;//((i_outer*micro_i+idx/4+i_oo+8) > size_i);
+                    bool oob_k1 = false;//(((idx%4+k_outer) > size_k));
+                    bool oob_k2 = false;//(((4+idx%4+k_outer) > size_k));
+                    uint32_t a1 = __float_as_uint((oob_i1 || oob_k1) ? 0.0 : __ldg(a+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
+                    uint32_t a2 = __float_as_uint((oob_i2 || oob_k1) ? 0.0 : __ldg(a+8*size_k+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
+                    uint32_t a3 = __float_as_uint((oob_i1 || oob_k2) ? 0.0 : __ldg(a+4+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
+                    uint32_t a4 = __float_as_uint((oob_i2 || oob_k2) ? 0.0 : __ldg(a+8*size_k+4+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
+                    for(int j_outer=0;j_outer<upper_cols;j_outer++){
+                        int idx = threadIdx.x;
+                        uint32_t d1 = c_micro[i_outer][j_outer][0];
+                        uint32_t d2 = c_micro[i_outer][j_outer][1];
+                        uint32_t d3 = c_micro[i_outer][j_outer][2];
+                        uint32_t d4 = c_micro[i_outer][j_outer][3];
+
+
+                        uint32_t b1 = b_micro[j_outer][0];
+                        uint32_t b2 = b_micro[j_outer][1];
+                        asm(
+                            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0, %1, %2, %3},     {%4, %5, %6, %7},  {%8, %9},  {%10, %11, %12, %13};"
+                            : "+r"(d1), "+r"(d2), "+r"(d3), "+r"(d4)
+                            : "r"(a1), "r"(a2), "r"(a3), "r"(a4),
+                            "r"(b1), "r"(b2),
+                            "r"(d1), "r"(d2), "r"(d3), "r"(d4)
+                        );
+                        c_micro[i_outer][j_outer][0] = d1;
+                        c_micro[i_outer][j_outer][1] = d2;
+                        c_micro[i_outer][j_outer][2] = d3;
+                        c_micro[i_outer][j_outer][3] = d4;
+                    }
+                }
             }
             for(int i_outer=0;i_outer<num_rows;i_outer++){
-                
-                bool oob_i1 = ((i_outer*micro_i+idx/4+i_oo) > size_i);
-                bool oob_i2 = ((i_outer*micro_i+idx/4+i_oo+8) > size_i);
-                bool oob_k1 = (((idx%4+k_outer) > size_k));
-                bool oob_k2 = (((4+idx%4+k_outer) > size_k));
-                uint32_t a1 = __float_as_uint((oob_i1 || oob_k1) ? 0.0 : __ldg(a+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
-                uint32_t a2 = __float_as_uint((oob_i2 || oob_k1) ? 0.0 : __ldg(a+8*size_k+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
-                uint32_t a3 = __float_as_uint((oob_i1 || oob_k2) ? 0.0 : __ldg(a+4+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
-                uint32_t a4 = __float_as_uint((oob_i2 || oob_k2) ? 0.0 : __ldg(a+8*size_k+4+idx%4+size_k*(i_outer*micro_i+idx/4+i_oo)+k_outer));
-                for(int j_outer=0;j_outer<num_cols;j_outer++){
-                    int idx = threadIdx.x;
-                    uint32_t d1 = c_micro[i_outer][j_outer][0];
-                    uint32_t d2 = c_micro[i_outer][j_outer][1];
-                    uint32_t d3 = c_micro[i_outer][j_outer][2];
-                    uint32_t d4 = c_micro[i_outer][j_outer][3];
-
-
-                    uint32_t b1 = b_micro[j_outer][0];
-                    uint32_t b2 = b_micro[j_outer][1];
-                    asm(
-                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0, %1, %2, %3},     {%4, %5, %6, %7},  {%8, %9},  {%10, %11, %12, %13};"
-                        : "+r"(d1), "+r"(d2), "+r"(d3), "+r"(d4)
-                        : "r"(a1), "r"(a2), "r"(a3), "r"(a4),
-                        "r"(b1), "r"(b2),
-                        "r"(d1), "r"(d2), "r"(d3), "r"(d4)
-                    );
-                    c_micro[i_outer][j_outer][0] = d1;
-                    c_micro[i_outer][j_outer][1] = d2;
-                    c_micro[i_outer][j_outer][2] = d3;
-                    c_micro[i_outer][j_outer][3] = d4;
+                for(int j_outer=0;j_outer<upper_cols;j_outer++){
+                    buf1[(2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][0]);
+                    buf1[(1+2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][1]);
+                    buf1[(2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(8+idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][2]);
+                    buf1[(1+2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(8+idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][3]);
                 }
             }
         }
-        for(int i_outer=0;i_outer<num_rows;i_outer++){
-            for(int j_outer=0;j_outer<num_cols;j_outer++){
-                buf1[2*(idx%4)+j_oo+j_outer*micro_j+CENTROIDBOUND*(idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][0]);
-                buf1[1+2*(idx%4)+j_oo+j_outer*micro_j+CENTROIDBOUND*(idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][1]);
-                buf1[2*(idx%4)+j_oo+j_outer*micro_j+CENTROIDBOUND*(8+idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][2]);
-                buf1[1+2*(idx%4)+j_oo+j_outer*micro_j+CENTROIDBOUND*(8+idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][3]);
-            }
-        }
-    }
-    __syncthreads();
+        __syncthreads();
 
-    for(int i=idx+i_oo;i<i_oo+micro_i*num_rows;i+=32){
-        if(i>=size_i) break;
-        float best_dist = buf1[(i-i_oo)*CENTROIDBOUND];
-        int best_cent = 0;
-        for(int j=1;j<size_j;j++){
-            float new_dist = buf1[(i-i_oo)*CENTROIDBOUND+j];
-            if(new_dist<best_dist){
-                best_dist = new_dist;
-                best_cent = j;
+        int upper_j = min(cent_offset+CENTROIDBOUND, size_j);
+
+        for(int i=idx+i_oo;i<i_oo+micro_i*num_rows;i+=32){
+            if(i>=size_i) break;
+            //float best_dist = buf1[(i-i_oo)*CENTROIDBOUND];
+            //int best_cent = 0;
+            int inner = (i-i_oo)/32;
+            for(int j=cent_offset;j<upper_j;j++){
+                float new_dist = buf1[(i-i_oo)+ROWBOUND*(j-cent_offset)];
+                if(j==0||new_dist<best_dists[inner]){
+                    best_dists[inner] = new_dist;
+                    best_cents[inner] = j;
+                }
             }
+            //if(upper_j>=size_j)
+            centroid_map[i] = best_cents[inner];
         }
-        centroid_map[i] = best_cent;
+        __syncthreads();
     }
 
 }
@@ -264,14 +283,15 @@ __global__ void compute_clusters(
 }
 
 
-const int points_per_thread = 800;
+const int points_per_thread = 4000;
+
 
 const int warp_size_2 = 32;
 
 const int block_size_2 = 4;
 
 
-const int MAX_CENTROIDS = 100;
+const int MAX_CENTROIDS = 128;
 
 
 
@@ -288,6 +308,8 @@ __global__ void compute_counts(
     int point_idx = threadIdx.x*points_per_thread+threadIdx.y*points_per_thread*warp_size_2
                     +blockIdx.x*points_per_thread*warp_size_2*block_size_2;
 
+    int min_centroid = MAX_CENTROIDS*blockIdx.y;
+
     int output_idx = point_idx/points_per_thread;
 
     if(point_idx>=n) return;
@@ -298,7 +320,7 @@ __global__ void compute_counts(
     
     int count_map[MAX_CENTROIDS];
 
-    for(int i=0;i<k;i++){
+    for(int i=0;i<MAX_CENTROIDS;i++){
         count_map[i]=0;
     }
     //cuda::std::unordered_map<int, float> sum_map;
@@ -307,13 +329,13 @@ __global__ void compute_counts(
 
     for(int p=point_idx;p<point_idx+points_per_thread;p++){
         if(p>=n) break;
-
-        count_map[centroid_map[p]]+=1;
+        if(min_centroid<=centroid_map[p]&&centroid_map[p]<min_centroid+MAX_CENTROIDS)
+            count_map[centroid_map[p]-min_centroid]+=1;
     }
+    int upper = min(min_centroid+MAX_CENTROIDS, k);
+    for(int i=min_centroid;i<upper;i++){
 
-    for(int i=0;i<k;i++){
-
-        global_point_counts[((n/points_per_thread)+1)*i+output_idx] = count_map[i];
+        global_point_counts[((n/points_per_thread)+1)*i+output_idx] = count_map[i-min_centroid];
     }
 }
 
@@ -328,11 +350,16 @@ __global__ void compute_centroids(
     int *global_point_counts
 ){
     
-    int dim = threadIdx.x;
+    int dim = threadIdx.x+threadIdx.z*32;
     int point_idx = threadIdx.y*points_per_thread+blockIdx.x*points_per_thread*warp_size_2
                     +blockIdx.y*points_per_thread*warp_size_2*block_size_2;
 
     int output_idx = point_idx/points_per_thread;
+
+    int min_centroid = MAX_CENTROIDS*blockIdx.z;
+
+
+    if(dim>=d) return;
 
     if(point_idx>=n) return;
 
@@ -342,7 +369,7 @@ __global__ void compute_centroids(
     
     float sum_map[MAX_CENTROIDS];
 
-    for(int i=0;i<k;i++){
+    for(int i=0;i<MAX_CENTROIDS;i++){
         sum_map[i]=0.0;
     }
     //cuda::std::unordered_map<int, float> sum_map;
@@ -358,19 +385,21 @@ __global__ void compute_centroids(
             sum_map[p] += points[p*d+dim];
         }*/
         //else{
-
-            sum_map[centroid_map[p]] += points[p*d+dim];
+        if(min_centroid<=centroid_map[p]&&centroid_map[p]<min_centroid+MAX_CENTROIDS)
+            sum_map[centroid_map[p]-min_centroid] += points[p*d+dim];
         //}
     }
     //__syncthreads();
 
     //if(blockIdx.x!=0) return;
+
+    int upper = min(min_centroid+MAX_CENTROIDS, k);
     
-    for(int i=0;i<k;i++){
+    for(int i=min_centroid;i<upper;i++){
         //if(sum_map.contains(i)){
             
             //if(point_idx==0&&dim==0){
-            global_dist_sums[((n/points_per_thread)+1)*(i*d+dim)+output_idx] = sum_map[i];
+            global_dist_sums[((n/points_per_thread)+1)*(i*d+dim)+output_idx] = sum_map[i-min_centroid];
             //global_dist_sums[0]=500.0;
             //}
         //}
@@ -504,14 +533,14 @@ void launch_kmeans(
     dim3 griddims0 = dim3(n/(num_rows*micro_i)+1);
 
 
-    for(int i=0;i<5;i++){
+    for(int i=0;i<1;i++){
         compute_squared_dists<<<k/32+1, 32>>>(k,d,initial_centroids,squared_centroids);
         dim3 thread_dims_1 = dim3(warp_size, block_size);
 
-        dim3 thread_dims_2 = dim3(d, warp_size_2);
-        dim3 block_dims_2 = dim3(block_size_2, n/warp_size_2/block_size_2/points_per_thread+1);
+        dim3 thread_dims_2 = dim3(32, warp_size_2, 1+(d-1)/32);
+        dim3 block_dims_2 = dim3(block_size_2, n/warp_size_2/block_size_2/points_per_thread+1, 1+(k-1)/MAX_CENTROIDS);
 
-        int num_blocks_3 = n/warp_size_2/block_size_2/points_per_thread+1;
+        dim3 num_blocks_3 = dim3(n/warp_size_2/block_size_2/points_per_thread+1, 1+(k-1)/MAX_CENTROIDS);
 
         dim3 thread_dims_3 = dim3(warp_size_2, block_size_2);
 
@@ -695,7 +724,7 @@ Results run_config(Mode mode, Scene &scene) {
      CUDA_CHECK(cudaMemcpy(
         returned_centroids.data(),
         centroids_gpu.data,
-        scene.initial_centroids.size() * sizeof(float),
+        scene.n_centroids * scene.dims * sizeof(float),
         cudaMemcpyDeviceToHost));
 
     float squared_dist_sum = 0;
@@ -733,7 +762,7 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
     const float stddev = 10.0;
     auto initial_centroids = std::vector<float>();
     auto normal = std::normal_distribution<double>(0.0, stddev);
-    for (int32_t i = 0; i < n_centroids*dims; i++) {
+    for (int32_t i = 0; i < (n_centroids+8)*dims; i++) {
         float z;
         z = unif_100(rng);
 
@@ -758,6 +787,9 @@ Scene gen_random(Rng &rng, int32_t dims, int32_t n_points, int32_t n_centroids){
                 
             }
         }
+    }
+    for(int i=0;i<16*dims;i++){
+        features.push_back(0.0);
     }
 
     
@@ -787,7 +819,7 @@ int main(int argc, char const *const *argv) {
     auto rng = std::mt19937(0xCA7CAFE);
     auto scenes = std::vector<SceneTest>();
     scenes.push_back(
-        {"test1", Mode::BENCHMARK, gen_random(rng, 32, 2000000, 100)});
+        {"test1", Mode::BENCHMARK, gen_random(rng, 32, 2000000, 1000)});
     int32_t fail_count = 0;
 
     int32_t count = 0;
