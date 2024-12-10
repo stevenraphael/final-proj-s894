@@ -76,10 +76,10 @@ const int micro_i = 16;
 const int micro_j = 8;
 const int micro_k = 8;
 
-const int CENTROIDBOUND = 128;
+const int CENTROIDBOUND = 64;
 const int num_rows = 4;
 
-const int num_cols = 8;
+const int num_cols = 4;
 
 const int ROWBOUND = micro_i*num_rows;
 
@@ -105,6 +105,9 @@ __global__ void matmul(
     int i_oo = blockIdx.x * num_rows*micro_i;
 
 
+    int idx2 = idx + micro_j*num_cols*threadIdx.y;
+
+
     //int j_oo = 0;
 
     float best_dists[4];
@@ -114,18 +117,19 @@ __global__ void matmul(
         int upper_j1 = min(size_j, CENTROIDBOUND+cent_offset);
 
 
-        for(int i=idx+i_oo;i<i_oo+micro_i*num_rows;i+=32){
+        /*for(int i=idx+i_oo;i<i_oo+micro_i*num_rows;i+=32){
             if(i>=size_i) break;
             for(int j=0;j<CENTROIDBOUND;j++){
                 if(j+cent_offset>=size_j)
                     break;
-                buf1[j*ROWBOUND+(i-i_oo)] = asquared[i]+bsquared[j+cent_offset];
+                buf1[j*ROWBOUND+(i-i_oo)] = 0;//asquared[i]+bsquared[j+cent_offset];
 
 
             }        
-        }
+        }*/
         __syncthreads();
-        for(int j_oo=cent_offset;j_oo<cent_offset+CENTROIDBOUND;j_oo+=num_cols*micro_j){
+        int j_oo=cent_offset+threadIdx.y*num_cols*micro_j;
+        //for(int j_oo=cent_offset;j_oo<cent_offset+CENTROIDBOUND;j_oo+=num_cols*micro_j){
             uint32_t b_micro[num_cols][2];
             uint32_t c_micro[num_rows][num_cols][4];
             for(int x=0;x<num_rows;x++){
@@ -183,25 +187,30 @@ __global__ void matmul(
             }
             for(int i_outer=0;i_outer<num_rows;i_outer++){
                 for(int j_outer=0;j_outer<upper_cols;j_outer++){
-                    buf1[(2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][0]);
-                    buf1[(1+2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][1]);
-                    buf1[(2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(8+idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][2]);
-                    buf1[(1+2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(8+idx/4+i_outer*micro_i)] -= 2*__uint_as_float(c_micro[i_outer][j_outer][3]);
+                    buf1[(2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(idx/4+i_outer*micro_i)] = -2*__uint_as_float(c_micro[i_outer][j_outer][0]);
+                    buf1[(1+2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(idx/4+i_outer*micro_i)] = -2*__uint_as_float(c_micro[i_outer][j_outer][1]);
+                    buf1[(2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(8+idx/4+i_outer*micro_i)] = -2*__uint_as_float(c_micro[i_outer][j_outer][2]);
+                    buf1[(1+2*(idx%4)+(j_oo-cent_offset)+j_outer*micro_j)*ROWBOUND+(8+idx/4+i_outer*micro_i)] = -2*__uint_as_float(c_micro[i_outer][j_outer][3]);
                 }
             }
-        }
+        //}
         __syncthreads();
 
         int upper_j = min(cent_offset+CENTROIDBOUND, size_j);
 
-        for(int i=idx+i_oo;i<i_oo+micro_i*num_rows;i+=32){
+        for(int i=idx2+i_oo;i<i_oo+micro_i*num_rows;i+=64){
             if(i>=size_i) break;
             //float best_dist = buf1[(i-i_oo)*CENTROIDBOUND];
             //int best_cent = 0;
             int inner = (i-i_oo)/32;
-            for(int j=cent_offset;j<upper_j;j++){
-                float new_dist = buf1[(i-i_oo)+ROWBOUND*(j-cent_offset)];
-                if(j==0||new_dist<best_dists[inner]){
+            float new_dist = buf1[(i-i_oo)]+asquared[i]+bsquared[cent_offset];
+            if(cent_offset==0||new_dist<best_dists[inner]){
+                best_dists[inner] = new_dist;
+                best_cents[inner] = cent_offset;
+            }
+            for(int j=cent_offset+1;j<upper_j;j++){
+                float new_dist = buf1[(i-i_oo)+ROWBOUND*(j-cent_offset)]+asquared[i]+bsquared[j];
+                if(new_dist<best_dists[inner]){
                     best_dists[inner] = new_dist;
                     best_cents[inner] = j;
                 }
@@ -535,7 +544,7 @@ void launch_kmeans(
 
     for(int i=0;i<1;i++){
         compute_squared_dists<<<k/32+1, 32>>>(k,d,initial_centroids,squared_centroids);
-        dim3 thread_dims_1 = dim3(warp_size, block_size);
+        dim3 thread_dims_1 = dim3(32,2);
 
         dim3 thread_dims_2 = dim3(32, warp_size_2, 1+(d-1)/32);
         dim3 block_dims_2 = dim3(block_size_2, n/warp_size_2/block_size_2/points_per_thread+1, 1+(k-1)/MAX_CENTROIDS);
@@ -545,7 +554,7 @@ void launch_kmeans(
         dim3 thread_dims_3 = dim3(warp_size_2, block_size_2);
 
 
-        matmul<<<griddims0, 32, shmem_size_bytes>>>(n,k,d, points, initial_centroids, centroid_map, squared_points, squared_centroids);
+        matmul<<<griddims0, thread_dims_1, shmem_size_bytes>>>(n,k,d, points, initial_centroids, centroid_map, squared_points, squared_centroids);
         //compute_clusters<<<n/warp_size/block_size+1,thread_dims_1>>>(n,k,d,points,initial_centroids,centroid_map);
         //compute_centroids<<<num_blocks_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
         compute_centroids<<<block_dims_2,thread_dims_2>>>(n,k,d,points,initial_centroids,centroid_map,dist_sums,point_counts);
