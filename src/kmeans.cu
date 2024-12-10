@@ -828,7 +828,7 @@ int main(int argc, char const *const *argv) {
     auto rng = std::mt19937(0xCA7CAFE);
     auto scenes = std::vector<SceneTest>();
     scenes.push_back(
-        {"test1", Mode::BENCHMARK, gen_random(rng, 32, 2000000, 1000)});
+        {"test1", Mode::BENCHMARK, gen_random(rng, 32, 2000000, 1024)});
     int32_t fail_count = 0;
 
     int32_t count = 0;
