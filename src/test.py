@@ -1,5 +1,8 @@
 import numpy as np
 from libKMCUDA import kmeans_cuda
+import sys
+sys.path.insert(0, "dependencies")
+from cuml import KMeans
 import time
 
 # Parameters
@@ -43,6 +46,24 @@ for i in range(3):
 # Print the results
 print("Generated Centroids (True Centroids):")
 print(true_centroids)
-print("\nKMeans CUDA Centroids:")
+print("\nKMCuda Centroids:")
+print(centroids)
+print(f"\nExecution time: {min_elapsed:.2f} milliseconds")
+
+
+print("____________________________________________________________________________________________")
+min_elapsed = 1000000.0
+
+for i in range(3):
+    start_time = time.time()
+    kmeans_float = KMeans(n_clusters = n_centroids)
+    kmeans_float.fit(arr)
+    elapsed_time = (time.time() - start_time)*1000
+    min_elapsed = min(min_elapsed, elapsed_time)
+
+# Print the results
+print("Generated Centroids (True Centroids):")
+print(true_centroids)
+print("\nRAPIDS Centroids:")
 print(centroids)
 print(f"\nExecution time: {min_elapsed:.2f} milliseconds")
