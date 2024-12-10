@@ -34,7 +34,7 @@ arr = np.vstack(points).astype(np.float32)
 print("____________________________________________________________________________________________")
 min_elapsed = 1000000.0
 
-for i in range(10):
+for i in range(3):
     start_time = time.time()
     centroids, assignments = kmeans_cuda(arr, n_centroids, verbosity=1, seed=3)
     elapsed_time = (time.time() - start_time)*1000

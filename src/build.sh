@@ -14,4 +14,4 @@ echo "Building the project..."
 # ----------------------------------------------------------------------------------
 # Build code.
 cp test.py ${CTR_BUILD_DIR}/test.py
-nvcc -O3 kmeans.cu -o ${CTR_BUILD_DIR}/kmeans
+nvcc -arch=sm_80 -O3 kmeans.cu -o ${CTR_BUILD_DIR}/kmeans
