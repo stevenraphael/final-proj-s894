@@ -12,12 +12,18 @@ nvcc --version
 # We can see what's on the execution server in the home dir:
 echo "Content:"; ls
 
-apt update
-apt install cmake -y
+# apt update
+# apt install cmake -y
 
 export CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
 # Run binary.
-CUDA_ARCH=86 pip install git+https://github.com/src-d/kmcuda.git#subdirectory=src
-python3 test.py
+# CUDA_ARCH=86 pip install git+https://github.com/src-d/kmcuda.git#subdirectory=src
+# python3 test.py
 
-./kmeans
+# ./kmeans
+cd ./krulis/experimental/k-means/k-means
+./k-means --N 2000000 --k 16 --dim 16 --algorithm cuda_best --iterations 1
+# ./k-means --N 2000000 --k 16 --dim 64 --algorithm cuda_best --iterations 1
+# ./k-means --N 2000000 --k 16 --dim 256 --algorithm cuda_best --iterations 1
+# ./k-means --N 2000000 --k 16 --dim 1024 --algorithm cuda_best --iterations 1
+# ./k-means --N 2000000 --k 16 --dim 4096 --algorithm cuda_best --iterations 1
